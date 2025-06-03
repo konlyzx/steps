@@ -1,0 +1,20 @@
+# Variables de entorno (¡NUNCA subir a GitHub!)
+.env
+
+# Dependencias
+node_modules/
+
+# Archivos de log
+*.log
+logs/
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
+
+# Archivos de venom-bot (sesiones)
+tokens/
+
+# Archivos de respaldo
+*.bak
+*.backup 
