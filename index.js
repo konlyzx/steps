@@ -2,54 +2,127 @@ require('dotenv').config({ path: '.env' });
 const venom = require('venom-bot');
 const OpenAI = require('openai');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
-// Servidor Express para mantener el bot activo
-const app = express();
-app.get('/', (req, res) => res.send('🤖 Bot de WhatsApp STEPS activo ✅ - DeepSeek GRATIS!'));
-app.get('/status', (req, res) => res.json({ 
-  status: 'active', 
-  model: 'deepseek-r1', 
-  tokensUsed: tokenCount,
-  dailyLimit: dailyLimit 
-}));
-
+// Variables de entorno y configuración
+const isProduction = process.env.PRODUCTION === 'true' || process.env.NODE_ENV === 'production';
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🌐 Servidor web escuchando en puerto ${port}`);
-  console.log(`📱 Accede a http://localhost:${port} para ver el estado del bot`);
+
+// Variables globales para QR y estado del bot
+let qrCode = '';
+let botStatus = 'Iniciando...';
+let venomClient = null;
+
+// Servidor Express
+const app = express();
+
+// Endpoints principales
+app.get('/', (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>STEPS WhatsApp Bot PRO</title>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f0f0f0; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+          .status { padding: 10px; border-radius: 5px; margin: 20px 0; }
+          .active { background: #d4edda; color: #155724; }
+          .waiting { background: #fff3cd; color: #856404; }
+          .error { background: #f8d7da; color: #721c24; }
+          .qr-section { margin: 30px 0; }
+          h1 { color: #333; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🤖 STEPS WhatsApp Bot PRO</h1>
+          <div class="status ${botStatus.includes('Conectado') ? 'active' : botStatus.includes('Error') ? 'error' : 'waiting'}">
+            <strong>Estado:</strong> ${botStatus}
+          </div>
+          <div class="qr-section">
+            ${qrCode ? `
+              <h2>📱 Escanea este QR con WhatsApp</h2>
+              <div style="background: white; padding: 20px; border-radius: 10px; display: inline-block;">
+                <pre style="font-size: 8px; line-height: 8px;">${qrCode}</pre>
+              </div>
+              <p><em>Abre WhatsApp → Menú → Dispositivos vinculados → Vincular dispositivo</em></p>
+            ` : ''}
+          </div>
+          <div style="margin-top: 30px;">
+            <h3>🚀 Funcionalidades</h3>
+            <ul style="text-align: left;">
+              <li>🧠 IA DeepSeek (GRATIS)</li>
+              <li>📱 Quick Replies interactivos</li>
+              <li>👟 Catálogo Nike y Adidas</li>
+              <li>👨‍💼 Derivación a asesor humano</li>
+              <li>🌐 Redirección a steps.co</li>
+            </ul>
+          </div>
+        </div>
+        <script>
+          // Auto-refresh cada 10 segundos para actualizar estado
+          setTimeout(() => window.location.reload(), 10000);
+        </script>
+      </body>
+    </html>
+  `);
 });
 
-// Override para usar OPENROUTER_API_KEY en lugar de OPENAI_API_KEY
+app.get('/status', (req, res) => res.json({ 
+  status: botStatus,
+  hasQR: !!qrCode,
+  isProduction: isProduction,
+  model: 'deepseek-chat',
+  tokensUsed: tokenCount,
+  dailyLimit: dailyLimit,
+  activeConversations: conversaciones.size,
+  timestamp: new Date().toISOString()
+}));
+
+app.get('/qr', (req, res) => {
+  if (qrCode) {
+    res.json({ qr: qrCode, status: 'available' });
+  } else {
+    res.json({ status: 'not_available', message: 'QR no disponible. El bot puede estar conectado.' });
+  }
+});
+
+// Iniciar servidor
+app.listen(port, () => {
+  console.log(`🌐 Servidor corriendo en puerto ${port}`);
+  console.log(`📱 Dashboard: ${isProduction ? 'https://tu-app.fly.dev' : `http://localhost:${port}`}`);
+  console.log(`🔧 Modo: ${isProduction ? 'PRODUCCIÓN' : 'LOCAL'}`);
+});
+
+// Override para usar OPENROUTER_API_KEY
 if (!process.env.OPENAI_API_KEY && process.env.OPENROUTER_API_KEY) {
   process.env.OPENAI_API_KEY = process.env.OPENROUTER_API_KEY;
 }
 
-// Configura OpenRouter con DeepSeek (GRATIS!)
+// Configura OpenRouter con DeepSeek
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY,
   defaultHeaders: {
-    "HTTP-Referer": process.env.SITE_URL || "https://steps-bot.local",
+    "HTTP-Referer": process.env.SITE_URL || "https://steps-bot.fly.dev",
     "X-Title": process.env.SITE_NAME || "STEPS WhatsApp Bot",
   },
 });
 
-// Contador de tokens para monitoreo
+// Sistema de conversaciones
 let tokenCount = 0;
-let dailyLimit = 50000000000000000000000000000000000000000000000000000000000000000000000000; // Límite más alto porque DeepSeek es GRATIS! 🎉
+let dailyLimit = 500000;
+const conversaciones = new Map();
+const limiteMensajesPorChat = 10;
+const numeroAsesor = "573181472095";
 
-// Sistema de conversaciones y límites
-const conversaciones = new Map(); // Para mantener contexto
-const limiteMensajesPorChat = 10; // Límite de mensajes por conversación
-const numeroAsesor = "573181472095"; // Número del asesor (pon tu número real aquí)
-
-// Función para contar tokens aproximadamente
+// Funciones principales
 function estimarTokens(texto) {
-  // Aproximación: 1 token ≈ 4 caracteres en español
   return Math.ceil(texto.length / 4);
 }
 
-// Función para obtener contexto de conversación
 function obtenerContexto(userId) {
   if (!conversaciones.has(userId)) {
     conversaciones.set(userId, {
@@ -62,7 +135,6 @@ function obtenerContexto(userId) {
   return conversaciones.get(userId);
 }
 
-// Base de conocimiento de zapatillas
 const baseDatos = {
   nike: {
     modelos: ["Air Max 90", "Air Max 270", "Air Force 1", "Jordan 1", "React Infinity", "Zoom Pegasus"],
@@ -76,27 +148,23 @@ const baseDatos = {
   }
 };
 
-// Función para responder con IA
+// Función IA
 async function responderIA(mensajeUsuario, contexto) {
-  console.log(`🤖 Procesando mensaje: "${mensajeUsuario}"`);
+  console.log(`🤖 Procesando: "${mensajeUsuario}"`);
   
   try {
-    // Verificar límite de tokens
     const tokensEstimados = estimarTokens(mensajeUsuario) + 200;
     
     if (tokenCount + tokensEstimados > dailyLimit) {
-      return '⚠️ Límite diario de consultas alcanzado. El bot se reactivará mañana. ¡Gracias por tu paciencia!';
+      return '⚠️ Límite diario alcanzado. El bot se reactivará mañana.';
     }
 
-    console.log(`🔧 Enviando consulta a DeepSeek...`);
-
-    // Construir historial de conversación para contexto
     const mensajesConContexto = [
       {
         role: 'system',
         content: `Eres un experto en zapatillas de STEPS, especializado en Nike y Adidas. 
 
-INFORMACIÓN DE PRODUCTOS:
+PRODUCTOS:
 Nike: ${JSON.stringify(baseDatos.nike)}
 Adidas: ${JSON.stringify(baseDatos.adidas)}
 
@@ -105,15 +173,12 @@ INSTRUCCIONES:
 - Mantén la conversación enfocada en calzado deportivo
 - Si preguntan por otras marcas, redirige a Nike/Adidas
 - Sé específico con modelos y precios
-- Si necesitan información detallada o quieren comprar, menciona que los conectarás con un asesor
-- Responde en español, de forma amigable y profesional
-- Máximo 150 palabras por respuesta`
+- Si necesitan info detallada, menciona que los conectarás con asesor
+- Responde en español, amigable y profesional
+- Máximo 150 palabras`
       },
-      ...contexto.historial.slice(-4), // Últimos 4 mensajes para contexto
-      {
-        role: 'user',
-        content: mensajeUsuario,
-      },
+      ...contexto.historial.slice(-4),
+      { role: 'user', content: mensajeUsuario }
     ];
 
     const completion = await openai.chat.completions.create({
@@ -122,298 +187,227 @@ INSTRUCCIONES:
       max_tokens: 150,
     });
     
-    // Actualizar contador de tokens
     tokenCount += completion.usage.total_tokens;
-    console.log(`🔢 Tokens usados en esta consulta: ${completion.usage.total_tokens}`);
-    console.log(`📊 Total tokens hoy: ${tokenCount}/${dailyLimit} (DeepSeek GRATIS! 🎉)`);
+    console.log(`🔢 Tokens: ${completion.usage.total_tokens} | Total: ${tokenCount}/${dailyLimit}`);
     
-    const respuesta = completion.choices[0].message.content;
-    console.log(`✅ Respuesta generada: "${respuesta}"`);
-    
-    return respuesta;
+    return completion.choices[0].message.content;
   } catch (err) {
-    console.error('Error al consultar DeepSeek:', err);
-    
-    if (err.response?.status === 429) {
-      return '⏳ Muchas consultas muy rápido. Espera un momentito y vuelve a intentar.';
-    } else if (err.response?.status === 401) {
-      return '🔑 Problema con la configuración. Contacta al administrador.';
-    }
-    
-    return 'Oops, algo falló... ¿Puedes intentar de nuevo?';
+    console.error('Error DeepSeek:', err);
+    return 'Error temporal. ¿Puedes intentar de nuevo?';
   }
 }
 
-// Función para procesar selecciones de quick replies
+// Procesar selecciones
 async function procesarSeleccion(client, userId, seleccion, contexto) {
   let respuesta = '';
   
   switch (seleccion) {
     case 'nike':
-      respuesta = `👟 **NIKE - Modelos Disponibles en STEPS**\n\n` +
-                 `🔥 **Catálogo actual:**\n` +
-                 `• Air Max 90\n` +
-                 `• Air Max 270\n` +
-                 `• Air Force 1\n` +
-                 `• Jordan 1\n` +
-                 `• React Infinity Run\n` +
-                 `• Zoom Pegasus\n\n` +
-                 `💻 **Para ver mejor cada producto, fotos y detalles completos visita:**\n` +
-                 `🌐 **steps.co**\n\n` +
-                 `📱 Ahí encontrarás toda la información detallada de cada modelo.`;
-      
-      // Marcar que ya seleccionó y detener IA para este usuario
+      respuesta = `👟 **NIKE - Modelos STEPS**\n\n🔥 **Catálogo:**\n• Air Max 90\n• Air Max 270\n• Air Force 1\n• Jordan 1\n• React Infinity Run\n• Zoom Pegasus\n\n💻 **Ver fotos y detalles:**\n🌐 **steps.co**`;
       contexto.iaDesactivada = true;
       break;
       
     case 'adidas':
-      respuesta = `👟 **ADIDAS - Modelos Disponibles en STEPS**\n\n` +
-                 `🔥 **Catálogo actual:**\n` +
-                 `• Ultraboost 22\n` +
-                 `• Stan Smith\n` +
-                 `• Superstar\n` +
-                 `• NMD R1\n` +
-                 `• Gazelle\n` +
-                 `• Forum Low\n\n` +
-                 `💻 **Para ver mejor cada producto, fotos y detalles completos visita:**\n` +
-                 `🌐 **steps.co**\n\n` +
-                 `📱 Ahí encontrarás toda la información detallada de cada modelo.`;
-      
-      // Marcar que ya seleccionó y detener IA para este usuario
+      respuesta = `👟 **ADIDAS - Modelos STEPS**\n\n🔥 **Catálogo:**\n• Ultraboost 22\n• Stan Smith\n• Superstar\n• NMD R1\n• Gazelle\n• Forum Low\n\n💻 **Ver fotos y detalles:**\n🌐 **steps.co**`;
       contexto.iaDesactivada = true;
       break;
       
-
-      
     case 'asesor':
-      // IA se desconecta completamente - asesor humano toma control
       contexto.derivadoAsesor = true;
       contexto.iaDesactivada = true;
+      respuesta = `👨‍💼 **Conectando con asesor especializado**\n\n⏰ **Un experto humano se hará cargo ahora**\n\n🤖 Mi función automática termina aquí.\n👤 Un asesor real de STEPS te atenderá.`;
       
-      respuesta = `👨‍💼 **Te estoy conectando con un asesor especializado**\n\n` +
-                 `⏰ **Un experto humano se hará cargo de tu consulta ahora**\n\n` +
-                 `🤖 Mi función como asistente automático termina aquí.\n` +
-                 `👤 A partir de este momento, un asesor real de STEPS te atenderá personalmente.`;
-                 
-      // Notificar al asesor que debe tomar control INMEDIATAMENTE
       if (userId !== numeroAsesor) {
         await client.sendText(numeroAsesor, 
-          `🚨 **ASESOR REQUERIDO - TOMAR CONTROL YA**\n\n` +
-          `👤 **Cliente:** ${userId}\n` +
-          `🤖 **Estado:** IA desactivada - TÚ TIENES CONTROL\n` +
-          `📝 **Acción:** Cliente pidió asesor humano\n\n` +
-          `⚠️ **IMPORTANTE:** Responde AHORA - el bot automático ya no funcionará para este cliente.\n` +
-          `💬 Todos los mensajes futuros los debes manejar TÚ manualmente.`
+          `🚨 **ASESOR REQUERIDO**\n👤 Cliente: ${userId}\n🤖 IA desactivada - TÚ TIENES CONTROL\n⚠️ Responde AHORA`
         );
       }
       break;
       
     default:
-      respuesta = 'Opción no reconocida. ¿En qué puedo ayudarte?';
+      respuesta = '❓ Opción no reconocida. ¿En qué puedo ayudarte?';
   }
   
   await client.sendText(userId, respuesta);
-  
-  // Agregar al historial
-  contexto.historial.push({
-    role: 'user',
-    content: `Seleccionó: ${seleccion}`
-  });
-  
-  contexto.historial.push({
-    role: 'assistant',
-    content: respuesta
-  });
-  
+  contexto.historial.push(
+    { role: 'user', content: `Seleccionó: ${seleccion}` },
+    { role: 'assistant', content: respuesta }
+  );
   contexto.mensajes++;
-  console.log(`✅ Selección procesada: ${seleccion}`);
+  console.log(`✅ Procesado: ${seleccion}`);
 }
 
-// Función para enviar quick replies con sintaxis correcta de Venom
+// Quick replies
 async function enviarQuickReplies(client, chatId, mensaje, opciones) {
   try {
-    // Crear lista de opciones
     const sections = [{
       title: 'Opciones disponibles',
-      rows: opciones.map((opcion, index) => ({
+      rows: opciones.map(opcion => ({
         rowId: opcion.id,
         title: opcion.title,
         description: ''
       }))
     }];
 
-    const listMessage = {
+    await client.sendListMessage(chatId, {
       text: mensaje,
       buttonText: 'Ver opciones',
       sections: sections,
       title: 'STEPS - Zapatillas',
       footer: 'Selecciona una opción'
-    };
-
-    await client.sendListMessage(chatId, listMessage);
-    console.log('✅ Quick replies enviados correctamente');
+    });
   } catch (error) {
-    console.log('⚠️ Lista no soportada, enviando botones simples');
-    
-    // Fallback: enviar botones simples
-    try {
-      const buttons = opciones.map(opcion => ({
-        buttonId: opcion.id,
-        buttonText: { displayText: opcion.title },
-        type: 1
-      }));
-
-      await client.sendButtons(chatId, mensaje, buttons, 'STEPS - Zapatillas');
-      console.log('✅ Botones simples enviados');
-    } catch (error2) {
-      console.log('⚠️ Botones no soportados, enviando mensaje con opciones');
-      
-      // Último fallback: mensaje de texto con opciones numeradas
-      let mensajeConOpciones = mensaje + '\n\n';
-      opciones.forEach((opcion, index) => {
-        mensajeConOpciones += `${index + 1}. ${opcion.title}\n`;
-      });
-      mensajeConOpciones += '\n💬 Responde con el número de tu elección.';
-      
-      await client.sendText(chatId, mensajeConOpciones);
-      console.log('✅ Mensaje con opciones numeradas enviado');
-    }
+    // Fallback a mensaje con opciones numeradas
+    let mensajeConOpciones = mensaje + '\n\n';
+    opciones.forEach((opcion, index) => {
+      mensajeConOpciones += `${index + 1}. ${opcion.title}\n`;
+    });
+    mensajeConOpciones += '\n💬 Responde con el número.';
+    await client.sendText(chatId, mensajeConOpciones);
   }
 }
 
 // Reiniciar contador diario
 setInterval(() => {
   tokenCount = 0;
-  console.log('🔄 Contador de tokens reiniciado para nuevo día');
-}, 24 * 60 * 60 * 1000); // 24 horas
+  console.log('🔄 Contador tokens reiniciado');
+}, 24 * 60 * 60 * 1000);
 
-// Arranca el bot
+// Configuración dinámica según entorno
+const venomConfig = {
+  session: 'steps-bot-pro',
+  multidevice: true,
+  folderNameToken: 'tokens',
+  mkdirFolderToken: '',
+  headless: isProduction, // TRUE en producción, FALSE en local
+  devtools: false,
+  useChrome: true,
+  debug: false,
+  logQR: false, // Manejamos QR manualmente
+  autoClose: false,
+  browserArgs: isProduction ? [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process',
+    '--disable-gpu',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding'
+  ] : [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage'
+  ],
+  refreshQR: 15000,
+  waitForLogin: 0,
+};
+
+// Iniciar Venom Bot
+console.log(`🚀 Iniciando bot en modo ${isProduction ? 'PRODUCCIÓN' : 'LOCAL'}`);
+botStatus = 'Iniciando Venom Bot...';
+
 venom
-  .create({
-    session: 'bot-kevin',
-    multidevice: true,
-    folderNameToken: 'tokens',
-    mkdirFolderToken: '',
-    headless: false, // Cambiado a false para mostrar el QR claramente
-    devtools: false,
-    useChrome: true,
-    debug: false,
-    logQR: true,
-    autoClose: false, // ¡¡Esto es clave!! - No cerrar automáticamente
-    browserArgs: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run'
-    ],
-    refreshQR: 15000,
-    waitForLogin: 0, // Sin timeout para login
+  .create(venomConfig)
+  .then((client) => {
+    venomClient = client;
+    start(client);
   })
-  .then((client) => start(client))
-  .catch((err) => console.log(err));
+  .catch((err) => {
+    console.error('❌ Error iniciando bot:', err);
+    botStatus = `Error: ${err.message}`;
+  });
+
+// Event listeners para QR
+venom.ev.on('qr', (qr) => {
+  qrCode = qr;
+  botStatus = 'Esperando escaneo de QR...';
+  console.log('📱 QR generado - Disponible en /');
+});
+
+venom.ev.on('connected', () => {
+  qrCode = '';
+  botStatus = 'Conectado ✅';
+  console.log('✅ Bot conectado exitosamente');
+});
+
+venom.ev.on('disconnected', () => {
+  botStatus = 'Desconectado - Reintentando...';
+  console.log('🔄 Bot desconectado, reintentando...');
+});
 
 function start(client) {
-  console.log('🤖 Bot de WhatsApp STEPS PRO corriendo con DeepSeek GRATIS! 🎉');
-  console.log(`📊 Límite diario configurado: ${dailyLimit} tokens (sin costos!)`);
-  console.log(`👨‍💼 Número de asesor configurado: ${numeroAsesor}`);
+  console.log('🤖 STEPS Bot PRO activo con DeepSeek!');
+  console.log(`📊 Límite: ${dailyLimit} tokens/día`);
+  console.log(`👨‍💼 Asesor: ${numeroAsesor}`);
+  
+  botStatus = 'Conectado y funcionando ✅';
 
   client.onMessage(async (message) => {
     if (message.body && !message.isGroupMsg) {
       const userId = message.from;
       const mensajeUsuario = message.body.toLowerCase();
       
-      console.log(`📩 Mensaje de ${userId}: ${message.body}`);
-
-      // Obtener contexto de conversación
+      console.log(`📩 ${userId}: ${message.body}`);
       const contexto = obtenerContexto(userId);
       
-      // SI LA IA ESTÁ DESACTIVADA, NO RESPONDER (asesor humano debe manejar)
+      // IA desactivada - solo asesor humano
       if (contexto.iaDesactivada || contexto.derivadoAsesor) {
-        console.log(`🚫 IA desactivada para ${userId} - Asesor humano debe responder`);
-        return; // No hacer nada, el asesor humano maneja todo
+        console.log(`🚫 IA OFF para ${userId} - Asesor maneja`);
+        return;
       }
       
-      // Verificar límite de mensajes por chat
+      // Límite de mensajes
       if (contexto.mensajes >= limiteMensajesPorChat && !contexto.derivadoAsesor) {
         contexto.derivadoAsesor = true;
         await client.sendText(userId, 
-          `🔄 Has alcanzado el límite de ${limiteMensajesPorChat} mensajes.\n\n` +
-          `👨‍💼 Te voy a conectar con un asesor humano para una atención más personalizada.\n\n` +
-          `📞 En breve un especialista se comunicará contigo para ayudarte con tu compra.`
+          `🔄 Límite de ${limiteMensajesPorChat} mensajes alcanzado.\n\n👨‍💼 Te conectaré con un asesor humano.`
         );
         
-        // Notificar al asesor
         if (userId !== numeroAsesor) {
           await client.sendText(numeroAsesor, 
-            `🆕 CLIENTE DERIVADO\n` +
-            `👤 Usuario: ${userId}\n` +
-            `💬 Mensajes intercambiados: ${contexto.mensajes}\n` +
-            `📝 Último mensaje: "${message.body}"\n\n` +
-            `⚡ Contacta al cliente para continuar la atención.`
+            `🆕 CLIENTE DERIVADO\n👤 ${userId}\n💬 ${contexto.mensajes} mensajes\n📝 "${message.body}"`
           );
         }
         return;
       }
 
-      // Manejar selecciones de quick replies
+      // Quick replies
       if (message.selectedButtonId || message.selectedRowId) {
         const seleccion = message.selectedButtonId || message.selectedRowId;
-        console.log(`🎯 Usuario seleccionó: ${seleccion}`);
-        
-        // Procesar selección
         await procesarSeleccion(client, userId, seleccion, contexto);
         return;
       }
 
-      // Manejar respuestas directas de asesor
-      if (mensajeUsuario.includes('asesor') || mensajeUsuario.includes('humano') || 
-          mensajeUsuario.includes('persona') || mensajeUsuario.includes('comprar')) {
-        
+      // Solicitud directa de asesor
+      if (mensajeUsuario.includes('asesor') || mensajeUsuario.includes('humano') || mensajeUsuario.includes('comprar')) {
         contexto.derivadoAsesor = true;
         await client.sendText(userId, 
-          `👨‍💼 ¡Perfecto! Te conectaré con uno de nuestros asesores especializados.\n\n` +
-          `⏰ Un experto en zapatillas Nike y Adidas se comunicará contigo en los próximos minutos.\n\n` +
-          `💡 Mientras tanto, puedes decirnos qué tipo de zapatilla buscas para acelerar el proceso.`
+          `👨‍💼 ¡Perfecto! Te conectaré con un asesor especializado.\n\n⏰ Un experto se comunicará contigo pronto.`
         );
         
         if (userId !== numeroAsesor) {
           await client.sendText(numeroAsesor, 
-            `🆕 SOLICITUD DE ASESOR\n` +
-            `👤 Usuario: ${userId}\n` +
-            `💬 Mensajes: ${contexto.mensajes}\n` +
-            `📝 Mensaje: "${message.body}"\n\n` +
-            `🚀 Cliente solicita atención personalizada.`
+            `🆕 SOLICITUD ASESOR\n👤 ${userId}\n📝 "${message.body}"`
           );
         }
         return;
       }
 
-      // Incrementar contador de mensajes
+      // Procesar con IA
       contexto.mensajes++;
-      
-      // Agregar mensaje al historial
-      contexto.historial.push({
-        role: 'user',
-        content: message.body
-      });
+      contexto.historial.push({ role: 'user', content: message.body });
 
-      // Generar respuesta con IA
       const respuesta = await responderIA(message.body, contexto);
       
-      // Agregar respuesta al historial
-      contexto.historial.push({
-        role: 'assistant', 
-        content: respuesta
-      });
-
-      // Enviar respuesta
+      contexto.historial.push({ role: 'assistant', content: respuesta });
       await client.sendText(userId, respuesta);
 
-      // Enviar quick replies SOLO si es un usuario nuevo (primeros 2 mensajes)
-      const esNuevoUsuario = contexto.mensajes <= 2;
-
-      if (esNuevoUsuario) {
+      // Quick replies para nuevos usuarios
+      if (contexto.mensajes <= 2) {
         await enviarQuickReplies(client, userId, 
           '¿Qué te interesa ver? 👇', 
           [
@@ -424,7 +418,7 @@ function start(client) {
         );
       }
 
-      console.log(`✅ Respuesta enviada. Mensajes en chat: ${contexto.mensajes}/${limiteMensajesPorChat}`);
+      console.log(`✅ Respuesta enviada. Chat: ${contexto.mensajes}/${limiteMensajesPorChat}`);
     }
   });
 }
